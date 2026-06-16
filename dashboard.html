@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DHT11 Temperature Monitor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.0.5/mqtt.min.js"></script>
+
+<style>
+:root {
+  --bg: #0b0e18;
+  --surface: #131829;
+  --border: #232b4a;
+  --accent: #00d4aa;
+  --danger: #ef4444;
+  --warn: #f59e0b;
+  --text: #e2e8f0;
+  --muted: #64748b;
+  --font-data: 'JetBrains Mono', monospace;
+  --font-ui: 'Segoe UI', sans-serif;
+  --radius: 14px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 16px 40px;
+}
+
+.topbar {
+  width: 100%;
+  max-width: 620px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px 0 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 32px;
+}
+
+.brand {
+  font-family: var(--font-data);
+  font-size: 0.75rem;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+
+.conn-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.conn-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.conn-dot.live {
+  background: var(--accent);
+}
+
+.conn-dot.error {
+  background: var(--danger);
+}
+
+.grid {
+  width: 100%;
+  max-width: 620px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 24px 22px;
+  position: relative;
+  overflow: hidden;
+}
+
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity .3s;
+}
+
+.card.active::before {
+  opacity: 1;
+}
+
+.card-label {
+  font-size: .68rem;
+  letter-spacing: .16em;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-bottom: 14px;
+}
+
+.card-value {
+  font-family: var(--font-data);
+  font-size: 3.5rem;
+  font-weight: 700;
+}
+
+.card-value sup {
+  font-size: 1rem;
+  color: var(--muted);
+}
+
+.card-sub {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: .75rem;
+}
+
+.log-panel {
+  width: 100%;
+  max-width: 620px;
+  margin-top: 16px;
+}
+
+.log-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.log-title {
+  font-size: .68rem;
+  letter-spacing: .16em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.log-clear {
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.log-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  height: 200px;
+  overflow-y: auto;
+  font-family: var(--font-data);
+  font-size: .72rem;
+}
+
+.entry.ok { color: var(--accent); }
+.entry.err { color: var(--danger); }
+.entry.warn { color: var(--warn); }
+</style>
+
+</head>
+
+<body>
+
+<div class="topbar">
+  <span class="brand">⬡ DHT11 Temperature Monitor</span>
+  <div class="conn-badge">
+    <div class="conn-dot" id="connDot"></div>
+    <span id="connLabel">Connecting...</span>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card" id="cardTemp">
+    <div class="card-label">Temperature</div>
+    <div class="card-value" id="tempVal">--<sup>°C</sup></div>
+    <div class="card-sub" id="tempTs">Waiting for data...</div>
+  </div>
+</div>
+
+<div class="log-panel">
+  <div class="log-header">
+    <span class="log-title">Event Log</span>
+    <button class="log-clear" onclick="clearLog()">Clear</button>
+  </div>
+
+  <div class="log-box" id="logBox"></div>
+</div>
+
+<script>
+// ===== MQTT CONFIG =====
+
+const BROKER_HOST = "broker.benax.rw";
+const BROKER_PORT = 9001; // WebSocket port
+
+const TOPIC_SENSOR = "sensors/herve/dht";
+const TOPIC_STATUS = "iot/status/herve/arduino_001";
+
+const CLIENT_ID =
+  "dashboard_" + Math.random().toString(16).slice(2, 8);
+
+// ===== DOM =====
+
+const connDot   = document.getElementById("connDot");
+const connLabel = document.getElementById("connLabel");
+
+const tempVal = document.getElementById("tempVal");
+const tempTs  = document.getElementById("tempTs");
+
+const logBox = document.getElementById("logBox");
+
+// ===== Helpers =====
+
+function setConn(cls, label) {
+  connDot.className = "conn-dot " + cls;
+  connLabel.textContent = label;
+}
+
+function flash(id) {
+  const el = document.getElementById(id);
+  el.classList.add("active");
+
+  setTimeout(() => {
+    el.classList.remove("active");
+  }, 800);
+}
+
+function addLog(msg, cls = "") {
+  const line = document.createElement("div");
+
+  line.className = "entry " + cls;
+  line.textContent =
+    `[${new Date().toLocaleTimeString()}] ${msg}`;
+
+  logBox.appendChild(line);
+
+  logBox.scrollTop = logBox.scrollHeight;
+}
+
+function clearLog() {
+  logBox.innerHTML = "";
+}
+
+// ===== MQTT =====
+
+function connect() {
+
+  const client = mqtt.connect(
+    `ws://${BROKER_HOST}:${BROKER_PORT}/mqtt`,
+    {
+      clientId: CLIENT_ID,
+      reconnectPeriod: 4000
+    }
+  );
+
+  client.on("connect", () => {
+
+    setConn("live", "Live");
+
+    addLog("MQTT connected", "ok");
+
+    client.subscribe(TOPIC_SENSOR);
+    client.subscribe(TOPIC_STATUS);
+  });
+
+  client.on("offline", () => {
+    setConn("", "Offline");
+    addLog("Broker offline", "warn");
+  });
+
+  client.on("error", (err) => {
+    setConn("error", "Error");
+    addLog(err.message, "err");
+  });
+
+  client.on("message", (topic, payload) => {
+
+    const msg = payload.toString();
+
+    if (topic === TOPIC_SENSOR) {
+
+      try {
+
+        const data = JSON.parse(msg);
+
+        const ts =
+          data.timestamp
+          ? new Date(data.timestamp * 1000).toLocaleTimeString()
+          : new Date().toLocaleTimeString();
+
+        tempVal.innerHTML =
+          `${data.temperature.toFixed(1)}<sup>°C</sup>`;
+
+        tempTs.textContent =
+          "Updated at " + ts;
+
+        flash("cardTemp");
+
+        addLog(
+          `Temperature = ${data.temperature}°C`,
+          "ok"
+        );
+
+      } catch (e) {
+
+        addLog(
+          "JSON parse error: " + e.message,
+          "err"
+        );
+      }
+    }
+
+    if (topic === TOPIC_STATUS) {
+
+      addLog(
+        `Device status: ${msg}`,
+        msg === "online" ? "ok" : "warn"
+      );
+    }
+  });
+}
+
+connect();
+</script>
+
+</body>
+</html>
